@@ -12,7 +12,7 @@ int main() {
     dim3 dimBlock(block_size);
     dim3 dimGrid(grid_size);
     thread_space<<<dimGrid, dimBlock>>>();
-    // cudaDeviceSynchronize();
+    cudaDeviceSynchronize();
     printf("CPU_FIN\n");
 
     return 0;
