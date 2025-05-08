@@ -7,13 +7,14 @@
 #define N (2) // 행렬 크기
 
 int main() {
+    // cuBLAS 핸들 초기화
     cublasHandle_t handle;
-    cublasStatus_t status;
+    cublasCreate(&handle);
 
-    // 호스트 메모리 할당
-    float *h_A = (float *)malloc(N * N * sizeof(float)); // 행렬 A
-    float *h_b = (float *)malloc(N * sizeof(float));     // 벡터 b
-    float *h_x = (float *)malloc(N * sizeof(float));     // 해 x
+    // 호스트 메모리 할당 및 초기화
+    float h_A[N * N] = {5.0f, 2.0f, 2.0f, 3.0f}; // A 행렬 [[5, 2], [2, 3]]
+    float h_b[N] = {-2.0f, 4.0f};               // b 벡터 [-2, 4]
+    float h_x[N] = {0.0f, 0.0f};                // 초기 해 x = [0, 0]
 
     // 디바이스 메모리 할당
     float *d_A, *d_b, *d_x, *d_r, *d_p, *d_Ap;
@@ -24,24 +25,6 @@ int main() {
     cudaMalloc((void **)&d_p, N * sizeof(float));
     cudaMalloc((void **)&d_Ap, N * sizeof(float));
 
-    // cuBLAS 핸들 초기화
-    cublasCreate(&handle);
-
-    // 행렬 A와 벡터 b 초기화
-    // A 행렬을 [[5,2], [2,3]]으로 초기화
-    h_A[0] = 5.0f;  // [0][0]
-    h_A[1] = 2.0f;  // [0][1]
-    h_A[2] = 2.0f;  // [1][0]
-    h_A[3] = 3.0f;  // [1][1]
-
-    h_b[0] = -2.0f; // b[0]
-    h_b[1] = 4.0f;  // b[1]
-
-    // 초기 해 x를 0으로 설정
-    for (int i = 0; i < N; i++) {
-        h_x[i] = 0.0f;
-    }
-
     // 호스트 데이터를 디바이스로 복사
     cublasSetMatrix(N, N, sizeof(float), h_A, N, d_A, N);
     cublasSetVector(N, sizeof(float), h_b, 1, d_b, 1);
@@ -50,14 +33,12 @@ int main() {
     // CGM 알고리즘 변수 초기화
     float alpha, beta, rTr, tmp;
     int k = 0, maxit = 1000;
-    float epsilon = 1e-6;
+    float epsilon = 1e-6f;
 
     // r = b - A * x
-    float minusOne = -1.0f;
-    float zero = 0.0f;
-    float one = 1.0f;
+    float minusOne = -1.0f, zero = 0.0f, one = 1.0f;
     cublasSgemv(handle, CUBLAS_OP_N, N, N, &minusOne, d_A, N, d_x, 1, &one, d_b, 1); // r = b - A * x
-    cublasScopy(handle, N, d_b, 1, d_r, 1); // r = b
+    cublasScopy(handle, N, d_b, 1, d_r, 1);                                         // r = b
 
     // p = r
     cublasScopy(handle, N, d_r, 1, d_p, 1);
@@ -112,9 +93,6 @@ int main() {
     }
 
     // 메모리 해제
-    free(h_A);
-    free(h_b);
-    free(h_x);
     cudaFree(d_A);
     cudaFree(d_b);
     cudaFree(d_x);
