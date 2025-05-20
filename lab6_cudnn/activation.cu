@@ -9,7 +9,7 @@ int main(int argc, char** argv) {
 
     cudnnDataType_t dtype = CUDNN_DATA_FLOAT;
     cudnnTensorFormat_t format = CUDNN_TENSOR_NCHW;
-    int n = 1, c = 1, h = 1, w = 10;
+    int n = 1, c = 1, h = 1, w = 21;
     int NUM_ELEMENTS = n * c * h * w;
 
     cudnnTensorDescriptor_t data_desc;
@@ -26,13 +26,13 @@ int main(int argc, char** argv) {
     
     // 초기 데이터 설정
     for (int i = 0; i < NUM_ELEMENTS; i++) {
-        host_data[i] = i * 1.00f;
+        host_data[i] = (i - 10) * 1.00f;
     }
     
     // CPU에서 GPU로 데이터 복사
     cudaMemcpy(data, host_data, NUM_ELEMENTS * sizeof(float), cudaMemcpyHostToDevice);
     
-    printf("Original array:");
+    printf("Original array: ");
     for (int i = 0; i < NUM_ELEMENTS; i++) {
         printf("%.6f| ", host_data[i]);
     }
