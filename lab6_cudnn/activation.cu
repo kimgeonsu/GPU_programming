@@ -40,28 +40,47 @@ int main(int argc, char** argv) {
     float alpha[1] = {1};
     float beta[1] = {0.0};
 
-    cudnnActivationDescriptor_t sigmoid_activation;
-    cudnnActivationMode_t mode = CUDNN_ACTIVATION_SIGMOID;
-    cudnnNanPropagation_t prop = CUDNN_NOT_PROPAGATE_NAN;
-    cudnnCreateActivationDescriptor(&sigmoid_activation);
-    cudnnSetActivationDescriptor(sigmoid_activation, mode, prop, 0.0f);
-
-    cudnnActivationForward(my_handler, sigmoid_activation, alpha, data_desc, data, beta, data_desc, data);
-
-    // GPU에서 CPU로 결과 복사
-    cudaMemcpy(host_data, data, NUM_ELEMENTS * sizeof(float), cudaMemcpyDeviceToHost);
+    // Clipped RELU 활성화 함수 설정
+    cudnnActivationDescriptor_t clipped_relu_activation;
+    cudnnCreateActivationDescriptor(&clipped_relu_activation);
     
-    printf("Sigmoid result:");
-    for (int i = 0; i < NUM_ELEMENTS; i++) {
-        printf("%.6f| ", host_data[i]);
+    // 다양한 coefficient 값으로 Clipped RELU 테스트
+    float coeffs[] = {0.0f, 1.0f, -1.0f};
+    const char* coeff_names[] = {"0.0", "1.0", "-1.0"};
+    
+    for(int coeff_idx = 0; coeff_idx < 3; coeff_idx++) {
+        cudnnSetActivationDescriptor(clipped_relu_activation,
+                                   CUDNN_ACTIVATION_CLIPPED_RELU,
+                                   CUDNN_NOT_PROPAGATE_NAN,
+                                   coeffs[coeff_idx]);  // coefficient value
+
+        printf("\nClipped ReLU with coefficient %s:\n", coeff_names[coeff_idx]);
+        
+        // Forward pass
+        cudnnActivationForward(my_handler,
+                             clipped_relu_activation,
+                             alpha,
+                             data_desc,
+                             data,
+                             beta,
+                             data_desc,
+                             data);
+
+        // GPU에서 CPU로 결과 복사
+        cudaMemcpy(host_data, data, NUM_ELEMENTS * sizeof(float), cudaMemcpyDeviceToHost);
+        
+        printf("Clipped RELU result: ");
+        for (int i = 0; i < NUM_ELEMENTS; i++) {
+            printf("%.6f| ", host_data[i]);
+        }
+        printf("\n");
     }
-    printf("\n");
 
     // 메모리 해제
-    cudaFree(data);           // GPU 메모리 해제
-    free(host_data);          // CPU 메모리 해제
+    cudaFree(data);
+    free(host_data);
     cudnnDestroyTensorDescriptor(data_desc);
-    cudnnDestroyActivationDescriptor(sigmoid_activation);
+    cudnnDestroyActivationDescriptor(clipped_relu_activation);
     cudnnDestroy(my_handler);
     
     return 0;
