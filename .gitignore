@@ -1,0 +1,9 @@
+# Ignore everything
+*
+
+# Allow .cu and .cpp files
+!*.cu
+!*.cpp
+
+# Ignore .gitignore itself if needed
+!.gitignore
