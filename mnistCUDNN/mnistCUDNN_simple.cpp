@@ -166,18 +166,33 @@ void readImage(const char* fname, value_type* imgData_h, bool quiet = false)
         FatalError("Error reading image");
     }
     
-    // make sure this is an 8-bit single channel image
-    if (FreeImage_GetColorType(pBitmap) != FIC_MINISBLACK)
+    // Check image type and convert to grayscale if needed
+    bool is_color = false;
+    FIBITMAP *grayBitmap = pBitmap;
+    
+    if (FreeImage_GetColorType(pBitmap) != FIC_MINISBLACK || FreeImage_GetBPP(pBitmap) != 8)
     {
-        FatalError("This is not 8-bit single channel imagee");    
-    }
-    if (FreeImage_GetBPP(pBitmap) != 8)
-    {
-        FatalError("This is not 8-bit single channel imagee");   
+        if (!quiet) {
+            std::cout << "Color image detected - converting to grayscale..." << std::endl;
+            std::cout << "Original: " << FreeImage_GetBPP(pBitmap) << " bits, " 
+                      << "Color type: " << FreeImage_GetColorType(pBitmap) << std::endl;
+        }
+        
+        // Convert to 8-bit grayscale
+        grayBitmap = FreeImage_ConvertToGreyscale(pBitmap);
+        if (grayBitmap == NULL) {
+            FreeImage_Unload(pBitmap);
+            FatalError("Failed to convert image to grayscale");
+        }
+        is_color = true;
+        
+        if (!quiet) {
+            std::cout << "Converted to: " << FreeImage_GetBPP(grayBitmap) << " bits grayscale" << std::endl;
+        }
     }
 
-    int width = FreeImage_GetWidth(pBitmap);
-    int height = FreeImage_GetHeight(pBitmap);
+    int width = FreeImage_GetWidth(grayBitmap);
+    int height = FreeImage_GetHeight(grayBitmap);
     
     if (width != IMAGE_W || height != IMAGE_H)
     {
@@ -188,7 +203,7 @@ void readImage(const char* fname, value_type* imgData_h, bool quiet = false)
     // PyTorch normalization: (pixel/255 - 0.1307) / 0.3081
     for (int i = 0; i < height; ++i)
     { 
-        unsigned char *pSrcLine = FreeImage_GetScanLine(pBitmap, height - i - 1);
+        unsigned char *pSrcLine = FreeImage_GetScanLine(grayBitmap, height - i - 1);
         for (int j = 0; j < width; j++)
         {
             int idx = IMAGE_W*i + j;
@@ -197,13 +212,88 @@ void readImage(const char* fname, value_type* imgData_h, bool quiet = false)
         }
     }
 
-    FreeImage_Unload(pBitmap);
+    // Clean up memory
+    if (is_color) {
+        FreeImage_Unload(grayBitmap);  // Free the converted grayscale image
+    }
+    FreeImage_Unload(pBitmap);         // Free the original image
     
     // Apply basic preprocessing
     applyBasicPreprocessing(imgData_h, quiet);
 }
 
 // Basic preprocessing functions
+template <class value_type>
+void checkAndInvertColors(value_type* imgData, int width, int height) {
+    // Check if image has white background and dark digits (needs inversion)
+    
+    // Method 1: Check edge pixels vs center pixels
+    float edge_sum = 0.0f;
+    int edge_count = 0;
+    float center_sum = 0.0f;
+    int center_count = 0;
+    
+    // Sample edge pixels (border)
+    for (int i = 0; i < height; i++) {
+        for (int j = 0; j < width; j++) {
+            if (i < 3 || i >= height-3 || j < 3 || j >= width-3) {
+                // Edge pixels
+                edge_sum += (float)imgData[i * width + j];
+                edge_count++;
+            } else if (i >= height/4 && i < 3*height/4 && j >= width/4 && j < 3*width/4) {
+                // Center pixels
+                center_sum += (float)imgData[i * width + j];
+                center_count++;
+            }
+        }
+    }
+    
+    float edge_avg = edge_count > 0 ? edge_sum / edge_count : 0.0f;
+    float center_avg = center_count > 0 ? center_sum / center_count : 0.0f;
+    
+    // Method 2: Check overall brightness distribution
+    float overall_sum = 0.0f;
+    for (int i = 0; i < width * height; i++) {
+        overall_sum += (float)imgData[i];
+    }
+    float overall_avg = overall_sum / (width * height);
+    
+    // Decision logic: Invert if background appears to be bright (stricter criteria)
+    bool should_invert = false;
+    
+    // More strict criteria: both conditions should suggest white background
+    // Condition 1: Overall brightness is significantly high
+    bool high_overall_brightness = (overall_avg > 0.5f);
+    
+    // Condition 2: Edge is much brighter than center (strong white background signal)
+    bool bright_edge_pattern = (edge_avg > center_avg + 0.5f);
+    
+    // Condition 3: Very high overall brightness (clearly white background)
+    bool very_high_brightness = (overall_avg > 0.7f);
+    
+    // Invert only if we have strong evidence of white background
+    if (very_high_brightness || (high_overall_brightness && bright_edge_pattern)) {
+        should_invert = true;
+    }
+    
+    if (should_invert) {
+        std::cout << "Detected white background - inverting colors..." << std::endl;
+        std::cout << "Edge avg: " << edge_avg << ", Center avg: " << center_avg << ", Overall avg: " << overall_avg << std::endl;
+        
+        // Invert all pixel values
+        for (int i = 0; i < width * height; i++) {
+            float val = (float)imgData[i];
+            // For normalized range around [-1, 1], invert by negating
+            imgData[i] = Convert<value_type>()(-val);
+        }
+        
+        std::cout << "Color inversion completed." << std::endl;
+    } else {
+        std::cout << "Colors appear normal (dark background detected)." << std::endl;
+        std::cout << "Edge avg: " << edge_avg << ", Center avg: " << center_avg << ", Overall avg: " << overall_avg << std::endl;
+    }
+}
+
 template <class value_type>
 void gaussianSmooth(value_type* imgData, int width, int height) {
     value_type* smoothed = new value_type[width * height];
@@ -364,6 +454,47 @@ void applyBasicPreprocessing(value_type* imgData, bool quiet) {
     if (!quiet) std::cout << "Applying basic preprocessing..." << std::endl;
     
     // Apply basic preprocessing steps in conservative order
+    if (!quiet) checkAndInvertColors(imgData, IMAGE_W, IMAGE_H);  // Check and invert colors if needed
+    else {
+        // Silent version for batch processing with stricter criteria
+        float overall_sum = 0.0f;
+        float edge_sum = 0.0f;
+        int edge_count = 0;
+        float center_sum = 0.0f;
+        int center_count = 0;
+        
+        for (int i = 0; i < IMAGE_H; i++) {
+            for (int j = 0; j < IMAGE_W; j++) {
+                int idx = i * IMAGE_W + j;
+                float val = (float)imgData[idx];
+                overall_sum += val;
+                
+                if (i < 3 || i >= IMAGE_H-3 || j < 3 || j >= IMAGE_W-3) {
+                    edge_sum += val;
+                    edge_count++;
+                } else if (i >= IMAGE_H/4 && i < 3*IMAGE_H/4 && j >= IMAGE_W/4 && j < 3*IMAGE_W/4) {
+                    center_sum += val;
+                    center_count++;
+                }
+            }
+        }
+        
+        float overall_avg = overall_sum / (IMAGE_W * IMAGE_H);
+        float edge_avg = edge_count > 0 ? edge_sum / edge_count : 0.0f;
+        float center_avg = center_count > 0 ? center_sum / center_count : 0.0f;
+        
+        // Apply same strict criteria as in verbose mode
+        bool high_overall_brightness = (overall_avg > 0.5f);
+        bool bright_edge_pattern = (edge_avg > center_avg + 0.5f);
+        bool very_high_brightness = (overall_avg > 0.7f);
+        
+        if (very_high_brightness || (high_overall_brightness && bright_edge_pattern)) {
+            for (int i = 0; i < IMAGE_W * IMAGE_H; i++) {
+                imgData[i] = Convert<value_type>()(-(float)imgData[i]);
+            }
+        }
+    }
+    
     gaussianSmooth(imgData, IMAGE_W, IMAGE_H);    // Light noise reduction
     normalizeSize(imgData, IMAGE_W, IMAGE_H);     // Size normalization  
     centerOfMass(imgData, IMAGE_W, IMAGE_H);      // Center the digit
