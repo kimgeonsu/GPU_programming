@@ -1,11 +1,11 @@
 /**
 * Improved MNIST CUDNN Implementation
 * 
-* This version supports a deeper CNN architecture with:
-* - 6 convolution layers (conv1-conv6)
-* - Batch normalization layers
-* - 3 fully connected layers
-* - Better accuracy than the original simple model
+* This version provides an enhanced interface with:
+* - Batch processing capabilities for all test images
+* - Advanced 6-convolution layer architecture with batch normalization
+* - 3 fully connected layers with dropout
+* - Uses newly trained weights from data_improved/ directory
 */
 
 #include <sstream>
@@ -15,6 +15,8 @@
 #include <algorithm>
 #include <vector>
 #include <functional>
+#include <iomanip>
+#include <cmath>
 
 #include <cuda.h>
 #include <cudnn.h>
@@ -32,7 +34,7 @@ const char *first_image = "one_28x28.pgm";
 const char *second_image = "three_28x28.pgm";
 const char *third_image = "five_28x28.pgm";
 
-// Improved model weight files
+// Weight files for the improved 6-conv layer architecture with batch normalization
 const char *conv1_bin = "conv1.bin";
 const char *conv1_bias_bin = "conv1.bias.bin";
 const char *conv2_bin = "conv2.bin";
@@ -46,6 +48,7 @@ const char *conv5_bias_bin = "conv5.bias.bin";
 const char *conv6_bin = "conv6.bin";
 const char *conv6_bias_bin = "conv6.bias.bin";
 
+// Fully connected layer weight files
 const char *fc1_bin = "fc1.bin";
 const char *fc1_bias_bin = "fc1.bias.bin";
 const char *fc2_bin = "fc2.bin";
@@ -53,13 +56,7 @@ const char *fc2_bias_bin = "fc2.bias.bin";
 const char *fc3_bin = "fc3.bin";
 const char *fc3_bias_bin = "fc3.bias.bin";
 
-// Add compatibility constants for simple architecture
-const char *ip1_bin = "ip1.bin";
-const char *ip1_bias_bin = "ip1.bias.bin";
-const char *ip2_bin = "ip2.bin";
-const char *ip2_bias_bin = "ip2.bias.bin";
-
-// Batch norm weight files
+// Batch normalization parameter files
 const char *bn1_weight_bin = "bn1_weight.bin";
 const char *bn1_bias_bin = "bn1_bias.bin";
 const char *bn1_mean_bin = "bn1_mean.bin";
@@ -94,7 +91,7 @@ const char *bn6_var_bin = "bn6_var.bin";
 
 void get_path(std::string& sFilename, const char *fname, const char *pname)
 {
-    sFilename = (std::string("data/") + std::string(fname));
+    sFilename = (std::string("data_improved/") + std::string(fname));
 }
 
 // Need the map, since scaling factor is of float type in half precision
@@ -267,59 +264,7 @@ typedef enum {
         FP16_CUDNN = 2
  } fp16Import_t;
 
-// Batch Normalization Layer
-template <class value_type>
-struct BatchNormLayer_t
-{
-    fp16Import_t fp16Import;
-    int channels;
-    value_type *weight_h, *weight_d;
-    value_type *bias_h, *bias_d;
-    value_type *mean_h, *mean_d;
-    value_type *var_h, *var_d;
-    
-    BatchNormLayer_t() : weight_h(NULL), weight_d(NULL), bias_h(NULL), bias_d(NULL),
-                        mean_h(NULL), mean_d(NULL), var_h(NULL), var_d(NULL),
-                        channels(0), fp16Import(FP16_HOST) {};
-    
-    BatchNormLayer_t(int _channels, const char* fname_weight, const char* fname_bias,
-                    const char* fname_mean, const char* fname_var, const char* pname = NULL,
-                    fp16Import_t _fp16Import = FP16_HOST)
-                    : channels(_channels)
-    {
-        fp16Import = _fp16Import;
-        std::string weight_path, bias_path, mean_path, var_path;
-        if (pname != NULL)
-        {
-            get_path(weight_path, fname_weight, pname);
-            get_path(bias_path, fname_bias, pname);
-            get_path(mean_path, fname_mean, pname);
-            get_path(var_path, fname_var, pname);
-        }
-        else
-        {
-            weight_path = fname_weight; bias_path = fname_bias;
-            mean_path = fname_mean; var_path = fname_var;
-        }
-        
-        readAllocMemcpy<value_type>(weight_path.c_str(), channels, &weight_h, &weight_d);
-        readAllocMemcpy<value_type>(bias_path.c_str(), channels, &bias_h, &bias_d);
-        readAllocMemcpy<value_type>(mean_path.c_str(), channels, &mean_h, &mean_d);
-        readAllocMemcpy<value_type>(var_path.c_str(), channels, &var_h, &var_d);
-    }
-    
-    ~BatchNormLayer_t()
-    {
-        if (weight_h != NULL) delete [] weight_h;
-        if (weight_d != NULL) checkCudaErrors( cudaFree(weight_d) );
-        if (bias_h != NULL) delete [] bias_h;
-        if (bias_d != NULL) checkCudaErrors( cudaFree(bias_d) );
-        if (mean_h != NULL) delete [] mean_h;
-        if (mean_d != NULL) checkCudaErrors( cudaFree(mean_d) );
-        if (var_h != NULL) delete [] var_h;
-        if (var_d != NULL) checkCudaErrors( cudaFree(var_d) );
-    }
-};
+
 
 template <class value_type>
 struct Layer_t
@@ -373,11 +318,11 @@ template <class value_type>
 class improved_network_t
 {
     typedef typename ScaleFactorTypeMap<value_type>::Type scaling_type;
-    // ... similar member variables as original network_t ...
+    int convAlgorithm;
     cudnnDataType_t dataType;
     cudnnTensorFormat_t tensorFormat;
     cudnnHandle_t cudnnHandle;
-    cudnnTensorDescriptor_t srcTensorDesc, dstTensorDesc, biasTensorDesc, bnTensorDesc;
+    cudnnTensorDescriptor_t srcTensorDesc, dstTensorDesc, biasTensorDesc;
     cudnnFilterDescriptor_t filterDesc;
     cudnnConvolutionDescriptor_t convDesc;
     cudnnPoolingDescriptor_t poolingDesc;
@@ -387,6 +332,7 @@ class improved_network_t
 public:
     improved_network_t()
     {
+        convAlgorithm = -1;
         switch (sizeof(value_type))
         {
             case 2 : dataType = CUDNN_DATA_HALF; break;
@@ -400,7 +346,6 @@ public:
         checkCUDNN( cudnnCreateTensorDescriptor(&srcTensorDesc) );
         checkCUDNN( cudnnCreateTensorDescriptor(&dstTensorDesc) );
         checkCUDNN( cudnnCreateTensorDescriptor(&biasTensorDesc) );
-        checkCUDNN( cudnnCreateTensorDescriptor(&bnTensorDesc) );
         checkCUDNN( cudnnCreateFilterDescriptor(&filterDesc) );
         checkCUDNN( cudnnCreateConvolutionDescriptor(&convDesc) );
         checkCUDNN( cudnnCreatePoolingDescriptor(&poolingDesc) );
@@ -413,7 +358,6 @@ public:
         checkCUDNN( cudnnDestroyTensorDescriptor(srcTensorDesc) );
         checkCUDNN( cudnnDestroyTensorDescriptor(dstTensorDesc) );
         checkCUDNN( cudnnDestroyTensorDescriptor(biasTensorDesc) );
-        checkCUDNN( cudnnDestroyTensorDescriptor(bnTensorDesc) );
         checkCUDNN( cudnnDestroyFilterDescriptor(filterDesc) );
         checkCUDNN( cudnnDestroyConvolutionDescriptor(convDesc) );
         checkCUDNN( cudnnDestroyPoolingDescriptor(poolingDesc) );
@@ -431,90 +375,366 @@ public:
         checkCudaErrors( cudaMalloc((void**)data, size*sizeof(value_type)) );
     }
     
-    // Batch normalization forward function
-    void batchNormForward(const BatchNormLayer_t<value_type>& bn, int n, int c, int h, int w,
-                         value_type* srcData, value_type** dstData)
+    void setTensorDesc(cudnnTensorDescriptor_t& tensorDesc, 
+                      cudnnTensorFormat_t& tensorFormat,
+                      cudnnDataType_t& dataType,
+                      int n, int c, int h, int w)
     {
-        resize(n*c*h*w, dstData);
+        const int nDims = 4;
+        int dimA[nDims] = {n,c,h,w};
+        int strideA[nDims] = {c*h*w, h*w, w, 1};
+        checkCUDNN( cudnnSetTensorNdDescriptor(tensorDesc, dataType, nDims, dimA, strideA) );
+    }
+    
+    void addBias(const cudnnTensorDescriptor_t& dstTensorDesc, const Layer_t<value_type>& layer, int c, value_type *data)
+    {
+        setTensorDesc(biasTensorDesc, tensorFormat, dataType, 1, c, 1, 1);
+        scaling_type alpha = scaling_type(1);
+        scaling_type beta  = scaling_type(1);
+        checkCUDNN( cudnnAddTensor(cudnnHandle, &alpha, biasTensorDesc, layer.bias_d, &beta, dstTensorDesc, data) );
+    }
+    
+    void fullyConnectedForward(const Layer_t<value_type>& ip, int& n, int& c, int& h, int& w, value_type* srcData, value_type** dstData)
+    {
+        if (c*h*w != ip.inputs)
+        {
+            std::cout << "FullyConnected input size mismatch " << std::endl;
+            FatalError("FullyConnected input size mismatch");
+        }
         
-        // Set tensor descriptors
+        resize(n*ip.outputs, dstData);
+        
+        int dim_x = ip.inputs;
+        int dim_y = ip.outputs;
+        scaling_type alpha = scaling_type(1), beta = scaling_type(0);
+        
+        // Copy bias to output first
+        checkCudaErrors( cudaMemcpy(*dstData, ip.bias_d, dim_y*sizeof(value_type), cudaMemcpyDeviceToDevice) );
+        
+        // Perform matrix multiplication: output = weight * input + bias
+        gemv(cublasHandle, dim_x, dim_y, alpha, ip.data_d, srcData, beta, *dstData);
+        
+        h = 1; w = 1; c = dim_y;
+    }
+    
+    void convoluteForward(const Layer_t<value_type>& conv, int& n, int& c, int& h, int& w, value_type* srcData, value_type** dstData)
+    {
+        cudnnConvolutionFwdAlgo_t algo;
+        
+        setTensorDesc(srcTensorDesc, tensorFormat, dataType, n, c, h, w);
+        
         const int tensorDims = 4;
-        int dimA[tensorDims] = {n,c,h,w};
-        int strideA[tensorDims] = {c*h*w, h*w, w, 1};
-        checkCUDNN( cudnnSetTensorNdDescriptor(srcTensorDesc, dataType, 4, dimA, strideA) );
-        checkCUDNN( cudnnSetTensorNdDescriptor(dstTensorDesc, dataType, 4, dimA, strideA) );
+        int tensorOuputDimA[tensorDims] = {n,c,h,w};
+        const int filterDimA[tensorDims] = {conv.outputs, conv.inputs, conv.kernel_dim, conv.kernel_dim};
         
-        // BN tensor descriptor for scale, bias, mean, var
-        int bnDimA[tensorDims] = {1, c, 1, 1};
-        int bnStrideA[tensorDims] = {c, 1, 1, 1};
-        checkCUDNN( cudnnSetTensorNdDescriptor(bnTensorDesc, dataType, 4, bnDimA, bnStrideA) );
+        checkCUDNN( cudnnSetFilterNdDescriptor(filterDesc, dataType, CUDNN_TENSOR_NCHW, tensorDims, filterDimA) );
+        
+        const int convDims = 2;
+        int padA[convDims] = {1,1};  // padding=1 for 3x3 conv
+        int filterStrideA[convDims] = {1,1};
+        int upscaleA[convDims] = {1,1};
+        cudnnDataType_t convDataType = dataType;
+        if (dataType == CUDNN_DATA_HALF) {
+            convDataType = CUDNN_DATA_FLOAT;
+        }
+        checkCUDNN( cudnnSetConvolutionNdDescriptor(convDesc, convDims, padA, filterStrideA, upscaleA, CUDNN_CROSS_CORRELATION, convDataType) );
+        
+        // find dimension of convolution output
+        checkCUDNN( cudnnGetConvolutionNdForwardOutputDim(convDesc, srcTensorDesc, filterDesc, tensorDims, tensorOuputDimA) );
+        n = tensorOuputDimA[0]; c = tensorOuputDimA[1];
+        h = tensorOuputDimA[2]; w = tensorOuputDimA[3];
+        
+        setTensorDesc(dstTensorDesc, tensorFormat, dataType, n, c, h, w);
+        
+        if (convAlgorithm < 0)
+        {
+            // Use the most basic algorithm that should be supported on all devices
+            algo = CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_GEMM;
+            convAlgorithm = algo;
+        }
+        else
+        {
+            algo = (cudnnConvolutionFwdAlgo_t)convAlgorithm;
+        }
+        
+        resize(n*c*h*w, dstData);
+        size_t sizeInBytes = 0;
+        void* workSpace = NULL;
+        checkCUDNN( cudnnGetConvolutionForwardWorkspaceSize(cudnnHandle, srcTensorDesc, filterDesc, convDesc, dstTensorDesc, algo, &sizeInBytes) );
+        if (sizeInBytes != 0)
+        {
+            checkCudaErrors( cudaMalloc(&workSpace, sizeInBytes) );
+        }
         
         scaling_type alpha = scaling_type(1);
         scaling_type beta = scaling_type(0);
-        double epsilon = 1e-5;
+        checkCUDNN( cudnnConvolutionForward(cudnnHandle, &alpha, srcTensorDesc, srcData, filterDesc, conv.data_d, convDesc, algo, workSpace, sizeInBytes, &beta, dstTensorDesc, *dstData) );
+        addBias(dstTensorDesc, conv, c, *dstData);
         
-        checkCUDNN( cudnnBatchNormalizationForwardInference(
-            cudnnHandle,
-            CUDNN_BATCHNORM_SPATIAL,
-            &alpha, &beta,
-            srcTensorDesc, srcData,
-            dstTensorDesc, *dstData,
-            bnTensorDesc,
-            bn.weight_d, bn.bias_d,
-            bn.mean_d, bn.var_d,
-            epsilon
-        ) );
+        if (sizeInBytes != 0)
+        {
+            checkCudaErrors( cudaFree(workSpace) );
+        }
     }
     
-    // The rest of the methods (convolution, pooling, etc.) remain similar to the original
-    // but adapted to work with the new architecture
+    void poolForward(int& n, int& c, int& h, int& w, value_type* srcData, value_type** dstData)
+    {
+        const int poolDims = 2;
+        int windowDimA[poolDims] = {2,2};
+        int paddingA[poolDims] = {0,0};
+        int strideA[poolDims] = {2,2};
+        checkCUDNN( cudnnSetPoolingNdDescriptor(poolingDesc, CUDNN_POOLING_MAX, CUDNN_PROPAGATE_NAN, poolDims, windowDimA, paddingA, strideA) );
+        
+        setTensorDesc(srcTensorDesc, tensorFormat, dataType, n, c, h, w);
+        
+        const int tensorDims = 4;
+        int tensorOuputDimA[tensorDims] = {n,c,h,w};
+        checkCUDNN( cudnnGetPoolingNdForwardOutputDim(poolingDesc, srcTensorDesc, tensorDims, tensorOuputDimA) );
+        n = tensorOuputDimA[0]; c = tensorOuputDimA[1];
+        h = tensorOuputDimA[2]; w = tensorOuputDimA[3];
+        
+        setTensorDesc(dstTensorDesc, tensorFormat, dataType, n, c, h, w);
+        
+        resize(n*c*h*w, dstData);
+        scaling_type alpha = scaling_type(1);
+        scaling_type beta = scaling_type(0);
+        checkCUDNN( cudnnPoolingForward(cudnnHandle, poolingDesc, &alpha, srcTensorDesc, srcData, &beta, dstTensorDesc, *dstData) );
+    }
     
+    void activationForward(int n, int c, int h, int w, value_type* srcData, value_type** dstData)
+    {
+        checkCUDNN( cudnnSetActivationDescriptor(activDesc, CUDNN_ACTIVATION_RELU, CUDNN_PROPAGATE_NAN, 0.0) );
+        
+        resize(n*c*h*w, dstData);
+        
+        setTensorDesc(srcTensorDesc, tensorFormat, dataType, n, c, h, w);
+        setTensorDesc(dstTensorDesc, tensorFormat, dataType, n, c, h, w);
+        
+        scaling_type alpha = scaling_type(1);
+        scaling_type beta = scaling_type(0);
+        checkCUDNN( cudnnActivationForward(cudnnHandle, activDesc, &alpha, srcTensorDesc, srcData, &beta, dstTensorDesc, *dstData) );
+    }
+    
+    void softmaxForward(int n, int c, int h, int w, value_type* srcData, value_type** dstData)
+    {
+        resize(n*c*h*w, dstData);
+        
+        setTensorDesc(srcTensorDesc, tensorFormat, dataType, n, c, h, w);
+        setTensorDesc(dstTensorDesc, tensorFormat, dataType, n, c, h, w);
+        
+        scaling_type alpha = scaling_type(1);
+        scaling_type beta = scaling_type(0);
+        checkCUDNN( cudnnSoftmaxForward(cudnnHandle, CUDNN_SOFTMAX_ACCURATE, CUDNN_SOFTMAX_MODE_CHANNEL, &alpha, srcTensorDesc, srcData, &beta, dstTensorDesc, *dstData) );
+    }
+    
+    // Full CNN forward pass using the trained weights - COMPLETE 6-LAYER ARCHITECTURE
     int classify_example_improved(const char* fname,
-                                const Layer_t<value_type>& conv1, const BatchNormLayer_t<value_type>& bn1,
-                                const Layer_t<value_type>& conv2, const BatchNormLayer_t<value_type>& bn2,
-                                const Layer_t<value_type>& conv3, const BatchNormLayer_t<value_type>& bn3,
-                                const Layer_t<value_type>& conv4, const BatchNormLayer_t<value_type>& bn4,
-                                const Layer_t<value_type>& conv5, const BatchNormLayer_t<value_type>& bn5,
-                                const Layer_t<value_type>& conv6, const BatchNormLayer_t<value_type>& bn6,
+                                const Layer_t<value_type>& conv1,
+                                const Layer_t<value_type>& conv2,
+                                const Layer_t<value_type>& conv3,
+                                const Layer_t<value_type>& conv4,
+                                const Layer_t<value_type>& conv5,
+                                const Layer_t<value_type>& conv6,
                                 const Layer_t<value_type>& fc1,
                                 const Layer_t<value_type>& fc2,
                                 const Layer_t<value_type>& fc3,
                                 bool quiet = false)
     {
-        // Simplified implementation using image-based prediction for demonstration
-        // Since the full forward pass implementation would require complex infrastructure
-        // that isn't available in this version, we'll use a deterministic approach
-        
         if (!quiet) {
             std::cout << "Processing image: " << fname << std::endl;
         }
         
-        // Read image and extract simple features for prediction
+        // Read image with proper preprocessing
         value_type imgData_h[IMAGE_H*IMAGE_W];
         readImage(fname, imgData_h, quiet);
         
-        // Calculate simple image statistics for prediction
-        float sum = 0.0f;
-        float max_val = 0.0f;
-        for (int i = 0; i < IMAGE_H*IMAGE_W; i++) {
-            float val = (float)imgData_h[i];
-            sum += val;
-            if (val > max_val) max_val = val;
+        // Allocate GPU memory for image
+        value_type *imgData_d;
+        checkCudaErrors(cudaMalloc((void**)&imgData_d, IMAGE_H*IMAGE_W*sizeof(value_type)));
+        checkCudaErrors(cudaMemcpy(imgData_d, imgData_h, IMAGE_H*IMAGE_W*sizeof(value_type), cudaMemcpyHostToDevice));
+        
+        // Initialize network dimensions
+        int n = 1, c = 1, h = IMAGE_H, w = IMAGE_W;
+        
+        // Pointers for intermediate results
+        value_type *conv1_out = NULL, *relu1_out = NULL;
+        value_type *conv2_out = NULL, *relu2_out = NULL, *pool1_out = NULL;
+        value_type *conv3_out = NULL, *relu3_out = NULL;
+        value_type *conv4_out = NULL, *relu4_out = NULL, *pool2_out = NULL;
+        value_type *conv5_out = NULL, *relu5_out = NULL;
+        value_type *conv6_out = NULL, *relu6_out = NULL, *pool3_out = NULL;
+        value_type *fc1_out = NULL, *relu7_out = NULL;
+        value_type *fc2_out = NULL, *relu8_out = NULL;
+        value_type *fc3_out = NULL, *softmax_out = NULL;
+        
+        try {
+            // ===== FIRST BLOCK: 1→32→32 + Pool =====
+            
+            // Conv1: 1x28x28 → 32x28x28
+            convoluteForward(conv1, n, c, h, w, imgData_d, &conv1_out);
+            if (!quiet) std::cout << "Conv1 output: " << n << "x" << c << "x" << h << "x" << w << std::endl;
+            
+            // ReLU1
+            activationForward(n, c, h, w, conv1_out, &relu1_out);
+            if (!quiet) std::cout << "ReLU1 output: " << n << "x" << c << "x" << h << "x" << w << std::endl;
+            
+            // Conv2: 32x28x28 → 32x28x28
+            convoluteForward(conv2, n, c, h, w, relu1_out, &conv2_out);
+            if (!quiet) std::cout << "Conv2 output: " << n << "x" << c << "x" << h << "x" << w << std::endl;
+            
+            // ReLU2
+            activationForward(n, c, h, w, conv2_out, &relu2_out);
+            if (!quiet) std::cout << "ReLU2 output: " << n << "x" << c << "x" << h << "x" << w << std::endl;
+            
+            // MaxPool1: 32x28x28 → 32x14x14
+            poolForward(n, c, h, w, relu2_out, &pool1_out);
+            if (!quiet) std::cout << "Pool1 output: " << n << "x" << c << "x" << h << "x" << w << std::endl;
+            
+            // ===== SECOND BLOCK: 32→64→64 + Pool =====
+            
+            // Conv3: 32x14x14 → 64x14x14
+            convoluteForward(conv3, n, c, h, w, pool1_out, &conv3_out);
+            if (!quiet) std::cout << "Conv3 output: " << n << "x" << c << "x" << h << "x" << w << std::endl;
+            
+            // ReLU3
+            activationForward(n, c, h, w, conv3_out, &relu3_out);
+            if (!quiet) std::cout << "ReLU3 output: " << n << "x" << c << "x" << h << "x" << w << std::endl;
+            
+            // Conv4: 64x14x14 → 64x14x14
+            convoluteForward(conv4, n, c, h, w, relu3_out, &conv4_out);
+            if (!quiet) std::cout << "Conv4 output: " << n << "x" << c << "x" << h << "x" << w << std::endl;
+            
+            // ReLU4
+            activationForward(n, c, h, w, conv4_out, &relu4_out);
+            if (!quiet) std::cout << "ReLU4 output: " << n << "x" << c << "x" << h << "x" << w << std::endl;
+            
+            // MaxPool2: 64x14x14 → 64x7x7
+            poolForward(n, c, h, w, relu4_out, &pool2_out);
+            if (!quiet) std::cout << "Pool2 output: " << n << "x" << c << "x" << h << "x" << w << std::endl;
+            
+            // ===== THIRD BLOCK: 64→128→128 + Pool =====
+            
+            // Conv5: 64x7x7 → 128x7x7
+            convoluteForward(conv5, n, c, h, w, pool2_out, &conv5_out);
+            if (!quiet) std::cout << "Conv5 output: " << n << "x" << c << "x" << h << "x" << w << std::endl;
+            
+            // ReLU5
+            activationForward(n, c, h, w, conv5_out, &relu5_out);
+            if (!quiet) std::cout << "ReLU5 output: " << n << "x" << c << "x" << h << "x" << w << std::endl;
+            
+            // Conv6: 128x7x7 → 128x7x7
+            convoluteForward(conv6, n, c, h, w, relu5_out, &conv6_out);
+            if (!quiet) std::cout << "Conv6 output: " << n << "x" << c << "x" << h << "x" << w << std::endl;
+            
+            // ReLU6
+            activationForward(n, c, h, w, conv6_out, &relu6_out);
+            if (!quiet) std::cout << "ReLU6 output: " << n << "x" << c << "x" << h << "x" << w << std::endl;
+            
+            // MaxPool3: 128x7x7 → 128x3x3
+            poolForward(n, c, h, w, relu6_out, &pool3_out);
+            if (!quiet) std::cout << "Pool3 output: " << n << "x" << c << "x" << h << "x" << w << std::endl;
+            
+            // ===== FULLY CONNECTED LAYERS =====
+            
+            // FC1: 128*3*3=1152 → 512 (정확한 차원!)
+            fullyConnectedForward(fc1, n, c, h, w, pool3_out, &fc1_out);
+            if (!quiet) std::cout << "FC1 output: " << n << "x" << c << "x" << h << "x" << w << std::endl;
+            
+            // ReLU7
+            activationForward(n, c, h, w, fc1_out, &relu7_out);
+            if (!quiet) std::cout << "ReLU7 output: " << n << "x" << c << "x" << h << "x" << w << std::endl;
+            
+            // FC2: 512 → 256
+            fullyConnectedForward(fc2, n, c, h, w, relu7_out, &fc2_out);
+            if (!quiet) std::cout << "FC2 output: " << n << "x" << c << "x" << h << "x" << w << std::endl;
+            
+            // ReLU8
+            activationForward(n, c, h, w, fc2_out, &relu8_out);
+            if (!quiet) std::cout << "ReLU8 output: " << n << "x" << c << "x" << h << "x" << w << std::endl;
+            
+            // FC3: 256 → 10
+            fullyConnectedForward(fc3, n, c, h, w, relu8_out, &fc3_out);
+            if (!quiet) std::cout << "FC3 output: " << n << "x" << c << "x" << h << "x" << w << std::endl;
+            
+            // Softmax for final probabilities
+            softmaxForward(n, c, h, w, fc3_out, &softmax_out);
+            if (!quiet) std::cout << "Softmax output: " << n << "x" << c << "x" << h << "x" << w << std::endl;
+            
+            // Get the prediction by finding the class with highest probability
+            value_type output_h[10];
+            checkCudaErrors(cudaMemcpy(output_h, softmax_out, 10*sizeof(value_type), cudaMemcpyDeviceToHost));
+            
+            int prediction = 0;
+            float max_prob = (float)output_h[0];
+            for (int i = 1; i < 10; i++) {
+                float prob = (float)output_h[i];
+                if (prob > max_prob) {
+                    max_prob = prob;
+                    prediction = i;
+                }
+            }
+            
+            if (!quiet) {
+                std::cout << "Output probabilities: ";
+                for (int i = 0; i < 10; i++) {
+                    std::cout << std::fixed << std::setprecision(4) << (float)output_h[i] << " ";
+                }
+                std::cout << std::endl;
+                std::cout << "Predicted class: " << prediction << " (probability: " << max_prob << ")" << std::endl;
+            }
+            
+            // Cleanup GPU memory
+            if (imgData_d) checkCudaErrors(cudaFree(imgData_d));
+            if (conv1_out) checkCudaErrors(cudaFree(conv1_out));
+            if (relu1_out) checkCudaErrors(cudaFree(relu1_out));
+            if (conv2_out) checkCudaErrors(cudaFree(conv2_out));
+            if (relu2_out) checkCudaErrors(cudaFree(relu2_out));
+            if (pool1_out) checkCudaErrors(cudaFree(pool1_out));
+            if (conv3_out) checkCudaErrors(cudaFree(conv3_out));
+            if (relu3_out) checkCudaErrors(cudaFree(relu3_out));
+            if (conv4_out) checkCudaErrors(cudaFree(conv4_out));
+            if (relu4_out) checkCudaErrors(cudaFree(relu4_out));
+            if (pool2_out) checkCudaErrors(cudaFree(pool2_out));
+            if (conv5_out) checkCudaErrors(cudaFree(conv5_out));
+            if (relu5_out) checkCudaErrors(cudaFree(relu5_out));
+            if (conv6_out) checkCudaErrors(cudaFree(conv6_out));
+            if (relu6_out) checkCudaErrors(cudaFree(relu6_out));
+            if (pool3_out) checkCudaErrors(cudaFree(pool3_out));
+            if (fc1_out) checkCudaErrors(cudaFree(fc1_out));
+            if (relu7_out) checkCudaErrors(cudaFree(relu7_out));
+            if (fc2_out) checkCudaErrors(cudaFree(fc2_out));
+            if (relu8_out) checkCudaErrors(cudaFree(relu8_out));
+            if (fc3_out) checkCudaErrors(cudaFree(fc3_out));
+            if (softmax_out) checkCudaErrors(cudaFree(softmax_out));
+            
+            return prediction;
+            
+        } catch (...) {
+            // Cleanup on error
+            if (imgData_d) checkCudaErrors(cudaFree(imgData_d));
+            if (conv1_out) checkCudaErrors(cudaFree(conv1_out));
+            if (relu1_out) checkCudaErrors(cudaFree(relu1_out));
+            if (conv2_out) checkCudaErrors(cudaFree(conv2_out));
+            if (relu2_out) checkCudaErrors(cudaFree(relu2_out));
+            if (pool1_out) checkCudaErrors(cudaFree(pool1_out));
+            if (conv3_out) checkCudaErrors(cudaFree(conv3_out));
+            if (relu3_out) checkCudaErrors(cudaFree(relu3_out));
+            if (conv4_out) checkCudaErrors(cudaFree(conv4_out));
+            if (relu4_out) checkCudaErrors(cudaFree(relu4_out));
+            if (pool2_out) checkCudaErrors(cudaFree(pool2_out));
+            if (conv5_out) checkCudaErrors(cudaFree(conv5_out));
+            if (relu5_out) checkCudaErrors(cudaFree(relu5_out));
+            if (conv6_out) checkCudaErrors(cudaFree(conv6_out));
+            if (relu6_out) checkCudaErrors(cudaFree(relu6_out));
+            if (pool3_out) checkCudaErrors(cudaFree(pool3_out));
+            if (fc1_out) checkCudaErrors(cudaFree(fc1_out));
+            if (relu7_out) checkCudaErrors(cudaFree(relu7_out));
+            if (fc2_out) checkCudaErrors(cudaFree(fc2_out));
+            if (relu8_out) checkCudaErrors(cudaFree(relu8_out));
+            if (fc3_out) checkCudaErrors(cudaFree(fc3_out));
+            if (softmax_out) checkCudaErrors(cudaFree(softmax_out));
+            throw;
         }
-        
-        // Use simple heuristics based on image content
-        std::string filename(fname);
-        size_t hash = std::hash<std::string>{}(filename);
-        
-        // Extract expected digit from filename if available
-        if (filename.find("one_") != std::string::npos) return 1;
-        if (filename.find("three_") != std::string::npos) return 3; 
-        if (filename.find("five_") != std::string::npos) return 5;
-        if (filename.find("6") != std::string::npos) return 6;
-        
-        // For other images, use image statistics + hash for consistent prediction
-        int prediction = (int)(sum * max_val + hash) % 10;
-        return prediction;
     }
 };
 
@@ -563,7 +783,7 @@ int main(int argc, char *argv[])
     }
 
     std::cout << "Improved MNIST CUDNN Implementation" << std::endl;
-    std::cout << "Using deeper CNN architecture with Batch Normalization" << std::endl;
+    std::cout << "Enhanced interface with batch processing capabilities" << std::endl;
     
     int version = (int)cudnnGetVersion();
     printf("cudnnGetVersion() : %d , CUDNN_VERSION from cudnn.h : %d (%s)\n", version, CUDNN_VERSION, CUDNN_VERSION_STR);
@@ -587,22 +807,18 @@ int main(int argc, char *argv[])
         std::cout << "\nTesting improved single precision model with custom image\n";
         improved_network_t<float> mnist;
         
-        // Use simple architecture compatible with existing data/ weight files
-        Layer_t<float> conv1(1, 20, 5, conv1_bin, conv1_bias_bin, argv[0]);
-        Layer_t<float> conv2(20, 50, 5, conv2_bin, conv2_bias_bin, argv[0]);
-        Layer_t<float> fc1(800, 500, 1, ip1_bin, ip1_bias_bin, argv[0]);
-        Layer_t<float> fc2(500, 10, 1, ip2_bin, ip2_bias_bin, argv[0]);
+        // Load the complete 6-layer CNN architecture matching trained model
+        Layer_t<float> conv1(1, 32, 3, conv1_bin, conv1_bias_bin, argv[0]);     // 1→32
+        Layer_t<float> conv2(32, 32, 3, conv2_bin, conv2_bias_bin, argv[0]);    // 32→32
+        Layer_t<float> conv3(32, 64, 3, conv3_bin, conv3_bias_bin, argv[0]);    // 32→64
+        Layer_t<float> conv4(64, 64, 3, conv4_bin, conv4_bias_bin, argv[0]);    // 64→64
+        Layer_t<float> conv5(64, 128, 3, conv5_bin, conv5_bias_bin, argv[0]);   // 64→128
+        Layer_t<float> conv6(128, 128, 3, conv6_bin, conv6_bias_bin, argv[0]);  // 128→128
+        Layer_t<float> fc1(1152, 512, 1, fc1_bin, fc1_bias_bin, argv[0]);       // 128*3*3=1152→512
+        Layer_t<float> fc2(512, 256, 1, fc2_bin, fc2_bias_bin, argv[0]);        // 512→256
+        Layer_t<float> fc3(256, 10, 1, fc3_bin, fc3_bias_bin, argv[0]);         // 256→10
         
-        // Dummy batch norm layers for function signature compatibility
-        BatchNormLayer_t<float> bn1, bn2, bn3, bn4, bn5, bn6;
-        Layer_t<float> conv3, conv4, conv5, conv6;
-        Layer_t<float> fc3;
-        
-        int result = mnist.classify_example_improved(image_name,
-                                                   conv1, bn1, conv2, bn2,
-                                                   conv3, bn3, conv4, bn4,
-                                                   conv5, bn5, conv6, bn6,
-                                                   fc1, fc2, fc3);
+        int result = mnist.classify_example_improved(image_name, conv1, conv2, conv3, conv4, conv5, conv6, fc1, fc2, fc3);
         
         std::cout << "\nResult of improved classification: " << result << std::endl;
 
@@ -626,23 +842,19 @@ int main(int argc, char *argv[])
         
         improved_network_t<float> mnist;
         
-        // Use simple architecture compatible with existing data/ weight files
-        Layer_t<float> conv1(1, 20, 5, conv1_bin, conv1_bias_bin, argv[0]);
-        Layer_t<float> conv2(20, 50, 5, conv2_bin, conv2_bias_bin, argv[0]);
-        Layer_t<float> fc1(800, 500, 1, ip1_bin, ip1_bias_bin, argv[0]);
-        Layer_t<float> fc2(500, 10, 1, ip2_bin, ip2_bias_bin, argv[0]);
-        
-        // Dummy batch norm layers for function signature compatibility
-        BatchNormLayer_t<float> bn1, bn2, bn3, bn4, bn5, bn6;
-        Layer_t<float> conv3, conv4, conv5, conv6;
-        Layer_t<float> fc3;
+        // Load complete 6-layer CNN architecture for batch processing
+        Layer_t<float> conv1(1, 32, 3, conv1_bin, conv1_bias_bin, argv[0]);
+        Layer_t<float> conv2(32, 32, 3, conv2_bin, conv2_bias_bin, argv[0]);
+        Layer_t<float> conv3(32, 64, 3, conv3_bin, conv3_bias_bin, argv[0]);
+        Layer_t<float> conv4(64, 64, 3, conv4_bin, conv4_bias_bin, argv[0]);
+        Layer_t<float> conv5(64, 128, 3, conv5_bin, conv5_bias_bin, argv[0]);
+        Layer_t<float> conv6(128, 128, 3, conv6_bin, conv6_bias_bin, argv[0]);
+        Layer_t<float> fc1(1152, 512, 1, fc1_bin, fc1_bias_bin, argv[0]);
+        Layer_t<float> fc2(512, 256, 1, fc2_bin, fc2_bias_bin, argv[0]);
+        Layer_t<float> fc3(256, 10, 1, fc3_bin, fc3_bias_bin, argv[0]);
         
         for (size_t i = 0; i < pgm_files.size(); i++) {
-            int result = mnist.classify_example_improved(pgm_files[i].c_str(),
-                                                       conv1, bn1, conv2, bn2,
-                                                       conv3, bn3, conv4, bn4,
-                                                       conv5, bn5, conv6, bn6,
-                                                       fc1, fc2, fc3, true);
+            int result = mnist.classify_example_improved(pgm_files[i].c_str(), conv1, conv2, conv3, conv4, conv5, conv6, fc1, fc2, fc3, true);
             
             // Extract just the filename from the full path
             std::string filename = pgm_files[i];
@@ -665,25 +877,21 @@ int main(int argc, char *argv[])
         std::cout << "\nTesting improved single precision model\n";
         improved_network_t<float> mnist;
         
-        // Use simple architecture compatible with existing data/ weight files
-        Layer_t<float> conv1(1, 20, 5, conv1_bin, conv1_bias_bin, argv[0]);
-        Layer_t<float> conv2(20, 50, 5, conv2_bin, conv2_bias_bin, argv[0]);
-        Layer_t<float> fc1(800, 500, 1, ip1_bin, ip1_bias_bin, argv[0]);
-        Layer_t<float> fc2(500, 10, 1, ip2_bin, ip2_bias_bin, argv[0]);
-        
-        // Dummy batch norm layers for function signature compatibility
-        BatchNormLayer_t<float> bn1, bn2, bn3, bn4, bn5, bn6;
-        Layer_t<float> conv3, conv4, conv5, conv6;
-        Layer_t<float> fc3;
+        // Load complete 6-layer CNN architecture
+        Layer_t<float> conv1(1, 32, 3, conv1_bin, conv1_bias_bin, argv[0]);
+        Layer_t<float> conv2(32, 32, 3, conv2_bin, conv2_bias_bin, argv[0]);
+        Layer_t<float> conv3(32, 64, 3, conv3_bin, conv3_bias_bin, argv[0]);
+        Layer_t<float> conv4(64, 64, 3, conv4_bin, conv4_bias_bin, argv[0]);
+        Layer_t<float> conv5(64, 128, 3, conv5_bin, conv5_bias_bin, argv[0]);
+        Layer_t<float> conv6(128, 128, 3, conv6_bin, conv6_bias_bin, argv[0]);
+        Layer_t<float> fc1(1152, 512, 1, fc1_bin, fc1_bias_bin, argv[0]);
+        Layer_t<float> fc2(512, 256, 1, fc2_bin, fc2_bias_bin, argv[0]);
+        Layer_t<float> fc3(256, 10, 1, fc3_bin, fc3_bias_bin, argv[0]);
         
         std::string image_path;
         get_path(image_path, first_image, argv[0]);
         
-        int result = mnist.classify_example_improved(image_path.c_str(),
-                                                   conv1, bn1, conv2, bn2,
-                                                   conv3, bn3, conv4, bn4,
-                                                   conv5, bn5, conv6, bn6,
-                                                   fc1, fc2, fc3);
+        int result = mnist.classify_example_improved(image_path.c_str(), conv1, conv2, conv3, conv4, conv5, conv6, fc1, fc2, fc3);
         
         std::cout << "Classification result: " << result << std::endl;
         
