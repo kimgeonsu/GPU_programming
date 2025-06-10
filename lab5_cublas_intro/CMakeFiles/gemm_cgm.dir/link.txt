@@ -1,0 +1,1 @@
+/usr/bin/c++ CMakeFiles/gemm_cgm.dir/gemm_cgm.cpp.o -o gemm_cgm  /usr/lib/x86_64-linux-gnu/libcudart.so /usr/lib/x86_64-linux-gnu/libcublas.so 
