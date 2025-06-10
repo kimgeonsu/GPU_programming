@@ -314,6 +314,205 @@ private:
 // Rest of the implementation continues with the same pattern but supporting the new architecture...
 // Due to length constraints, I'll create a separate main function showing the key changes
 
+// Advanced preprocessing functions for improved accuracy
+template <class value_type>
+void centerOfMass(value_type* imgData, int width, int height) {
+    // Calculate center of mass
+    float sum_x = 0.0f, sum_y = 0.0f, total_mass = 0.0f;
+    
+    for (int i = 0; i < height; i++) {
+        for (int j = 0; j < width; j++) {
+            float val = (float)imgData[i * width + j];
+            if (val > 0.0f) {
+                sum_x += j * val;
+                sum_y += i * val;
+                total_mass += val;
+            }
+        }
+    }
+    
+    if (total_mass > 0) {
+        float center_x = sum_x / total_mass;
+        float center_y = sum_y / total_mass;
+        
+        // Calculate shift needed to center the digit
+        float target_x = width / 2.0f;
+        float target_y = height / 2.0f;
+        int shift_x = (int)round(target_x - center_x);
+        int shift_y = (int)round(target_y - center_y);
+        
+        // Create shifted image
+        value_type* temp_img = new value_type[width * height];
+        for (int i = 0; i < width * height; i++) {
+            temp_img[i] = value_type(0.0f);
+        }
+        
+        // Apply shift
+        for (int i = 0; i < height; i++) {
+            for (int j = 0; j < width; j++) {
+                int new_i = i + shift_y;
+                int new_j = j + shift_x;
+                
+                if (new_i >= 0 && new_i < height && new_j >= 0 && new_j < width) {
+                    temp_img[new_i * width + new_j] = imgData[i * width + j];
+                }
+            }
+        }
+        
+        // Copy back
+        for (int i = 0; i < width * height; i++) {
+            imgData[i] = temp_img[i];
+        }
+        
+        delete[] temp_img;
+    }
+}
+
+template <class value_type>
+void enhanceContrast(value_type* imgData, int width, int height) {
+    // Find min and max values
+    float min_val = 1000.0f, max_val = -1000.0f;
+    
+    for (int i = 0; i < width * height; i++) {
+        float val = (float)imgData[i];
+        if (val < min_val) min_val = val;
+        if (val > max_val) max_val = val;
+    }
+    
+    // Apply contrast stretching
+    float range = max_val - min_val;
+    if (range > 0.01f) {  // Avoid division by zero
+        for (int i = 0; i < width * height; i++) {
+            float val = (float)imgData[i];
+            float normalized = (val - min_val) / range;
+            // Apply gamma correction for better contrast
+            normalized = pow(normalized, 0.8f);
+            imgData[i] = Convert<value_type>()(normalized * 2.0f - 1.0f);  // Scale to [-1, 1]
+        }
+    }
+}
+
+template <class value_type>
+void gaussianSmooth(value_type* imgData, int width, int height) {
+    // Simple 3x3 Gaussian kernel for noise reduction
+    float kernel[9] = {
+        0.0625f, 0.125f, 0.0625f,
+        0.125f,  0.25f,  0.125f,
+        0.0625f, 0.125f, 0.0625f
+    };
+    
+    value_type* temp_img = new value_type[width * height];
+    
+    for (int i = 0; i < height; i++) {
+        for (int j = 0; j < width; j++) {
+            float sum = 0.0f;
+            
+            for (int ki = -1; ki <= 1; ki++) {
+                for (int kj = -1; kj <= 1; kj++) {
+                    int ni = i + ki;
+                    int nj = j + kj;
+                    
+                    if (ni >= 0 && ni < height && nj >= 0 && nj < width) {
+                        int kernel_idx = (ki + 1) * 3 + (kj + 1);
+                        sum += (float)imgData[ni * width + nj] * kernel[kernel_idx];
+                    }
+                }
+            }
+            
+            temp_img[i * width + j] = Convert<value_type>()(sum);
+        }
+    }
+    
+    // Copy back
+    for (int i = 0; i < width * height; i++) {
+        imgData[i] = temp_img[i];
+    }
+    
+    delete[] temp_img;
+}
+
+template <class value_type>
+void normalizeSize(value_type* imgData, int width, int height) {
+    // Calculate bounding box of non-zero pixels
+    int min_x = width, max_x = -1, min_y = height, max_y = -1;
+    
+    for (int i = 0; i < height; i++) {
+        for (int j = 0; j < width; j++) {
+            if ((float)imgData[i * width + j] > 0.1f) {
+                if (j < min_x) min_x = j;
+                if (j > max_x) max_x = j;
+                if (i < min_y) min_y = i;
+                if (i > max_y) max_y = i;
+            }
+        }
+    }
+    
+    // If valid bounding box found, normalize size
+    if (max_x >= min_x && max_y >= min_y) {
+        int bbox_width = max_x - min_x + 1;
+        int bbox_height = max_y - min_y + 1;
+        
+        // Target size should be about 80% of image size for good padding
+        int target_size = (int)((width < height ? width : height) * 0.8f);
+        
+        if (bbox_width > target_size || bbox_height > target_size) {
+            // Scale down if too large
+            float scale = (float)target_size / (bbox_width > bbox_height ? bbox_width : bbox_height);
+            
+            value_type* temp_img = new value_type[width * height];
+            for (int i = 0; i < width * height; i++) {
+                temp_img[i] = value_type(0.0f);
+            }
+            
+            // Apply scaling with bilinear interpolation
+            for (int i = 0; i < height; i++) {
+                for (int j = 0; j < width; j++) {
+                    // Map to original coordinates
+                    float orig_i = (i - height/2.0f) / scale + (min_y + max_y) / 2.0f;
+                    float orig_j = (j - width/2.0f) / scale + (min_x + max_x) / 2.0f;
+                    
+                    int oi = (int)orig_i;
+                    int oj = (int)orig_j;
+                    
+                    if (oi >= 0 && oi < height && oj >= 0 && oj < width) {
+                        temp_img[i * width + j] = imgData[oi * width + oj];
+                    }
+                }
+            }
+            
+            // Copy back
+            for (int i = 0; i < width * height; i++) {
+                imgData[i] = temp_img[i];
+            }
+            
+            delete[] temp_img;
+        }
+    }
+}
+
+template <class value_type>
+void applyAdvancedPreprocessing(value_type* imgData, bool quiet = false) {
+    if (!quiet) {
+        std::cout << "Applying advanced preprocessing..." << std::endl;
+    }
+    
+    // Step 1: Gaussian smoothing for noise reduction
+    gaussianSmooth<value_type>(imgData, IMAGE_W, IMAGE_H);
+    if (!quiet) std::cout << "  - Noise reduction applied" << std::endl;
+    
+    // Step 2: Size normalization
+    normalizeSize<value_type>(imgData, IMAGE_W, IMAGE_H);
+    if (!quiet) std::cout << "  - Size normalization applied" << std::endl;
+    
+    // Step 3: Center of mass centering
+    centerOfMass<value_type>(imgData, IMAGE_W, IMAGE_H);
+    if (!quiet) std::cout << "  - Center of mass centering applied" << std::endl;
+    
+    // Step 4: Contrast enhancement
+    enhanceContrast<value_type>(imgData, IMAGE_W, IMAGE_H);
+    if (!quiet) std::cout << "  - Contrast enhancement applied" << std::endl;
+}
+
 template <class value_type>
 class improved_network_t
 {
@@ -547,6 +746,9 @@ public:
         // Read image with proper preprocessing
         value_type imgData_h[IMAGE_H*IMAGE_W];
         readImage(fname, imgData_h, quiet);
+        
+        // Apply advanced preprocessing
+        applyAdvancedPreprocessing(imgData_h, quiet);
         
         // Allocate GPU memory for image
         value_type *imgData_d;
