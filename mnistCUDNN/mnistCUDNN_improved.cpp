@@ -393,6 +393,201 @@ void enhanceContrast(value_type* imgData, int width, int height) {
 }
 
 template <class value_type>
+void applyCLAHE(value_type* imgData, int width, int height, int tile_size = 8, float clip_limit = 2.0f) {
+    // Convert to 0-255 range for processing
+    value_type* temp_img = new value_type[width * height];
+    for (int i = 0; i < width * height; i++) {
+        float val = (float)imgData[i];
+        // Normalize to [0, 255]
+        temp_img[i] = Convert<value_type>()((val + 1.0f) * 127.5f);
+    }
+    
+    int tiles_x = (width + tile_size - 1) / tile_size;
+    int tiles_y = (height + tile_size - 1) / tile_size;
+    
+    // Process each tile
+    for (int ty = 0; ty < tiles_y; ty++) {
+        for (int tx = 0; tx < tiles_x; tx++) {
+            int start_x = tx * tile_size;
+            int start_y = ty * tile_size;
+            int end_x = std::min(start_x + tile_size, width);
+            int end_y = std::min(start_y + tile_size, height);
+            
+            // Create histogram for this tile
+            int hist[256] = {0};
+            int tile_pixels = 0;
+            
+            for (int y = start_y; y < end_y; y++) {
+                for (int x = start_x; x < end_x; x++) {
+                    int pixel = (int)((float)temp_img[y * width + x]);
+                    pixel = std::max(0, std::min(255, pixel));
+                    hist[pixel]++;
+                    tile_pixels++;
+                }
+            }
+            
+            // Apply contrast limiting
+            int clip_threshold = (int)(clip_limit * tile_pixels / 256.0f);
+            int excess = 0;
+            
+            for (int i = 0; i < 256; i++) {
+                if (hist[i] > clip_threshold) {
+                    excess += (hist[i] - clip_threshold);
+                    hist[i] = clip_threshold;
+                }
+            }
+            
+            // Redistribute excess pixels
+            int redistribute = excess / 256;
+            int remainder = excess % 256;
+            
+            for (int i = 0; i < 256; i++) {
+                hist[i] += redistribute;
+                if (i < remainder) {
+                    hist[i]++;
+                }
+            }
+            
+            // Create cumulative distribution
+            int cdf[256];
+            cdf[0] = hist[0];
+            for (int i = 1; i < 256; i++) {
+                cdf[i] = cdf[i-1] + hist[i];
+            }
+            
+            // Apply histogram equalization to tile
+            for (int y = start_y; y < end_y; y++) {
+                for (int x = start_x; x < end_x; x++) {
+                    int pixel = (int)((float)temp_img[y * width + x]);
+                    pixel = std::max(0, std::min(255, pixel));
+                    
+                    // Apply equalization
+                    int new_pixel = (cdf[pixel] * 255) / tile_pixels;
+                    temp_img[y * width + x] = Convert<value_type>()(new_pixel);
+                }
+            }
+        }
+    }
+    
+    // Convert back to [-1, 1] range
+    for (int i = 0; i < width * height; i++) {
+        float val = (float)temp_img[i];
+        imgData[i] = Convert<value_type>()((val / 127.5f) - 1.0f);
+    }
+    
+    delete[] temp_img;
+}
+
+template <class value_type>
+void enhanceEdges(value_type* imgData, int width, int height, float strength = 1.5f) {
+    // Unsharp masking for edge enhancement
+    value_type* blurred = new value_type[width * height];
+    value_type* enhanced = new value_type[width * height];
+    
+    // Create 5x5 Gaussian kernel for blurring
+    float kernel[25] = {
+        1.0f/256, 4.0f/256,  6.0f/256,  4.0f/256, 1.0f/256,
+        4.0f/256, 16.0f/256, 24.0f/256, 16.0f/256, 4.0f/256,
+        6.0f/256, 24.0f/256, 36.0f/256, 24.0f/256, 6.0f/256,
+        4.0f/256, 16.0f/256, 24.0f/256, 16.0f/256, 4.0f/256,
+        1.0f/256, 4.0f/256,  6.0f/256,  4.0f/256, 1.0f/256
+    };
+    
+    // Apply Gaussian blur
+    for (int i = 0; i < height; i++) {
+        for (int j = 0; j < width; j++) {
+            float sum = 0.0f;
+            
+            for (int ki = -2; ki <= 2; ki++) {
+                for (int kj = -2; kj <= 2; kj++) {
+                    int ni = i + ki;
+                    int nj = j + kj;
+                    
+                    if (ni >= 0 && ni < height && nj >= 0 && nj < width) {
+                        int kernel_idx = (ki + 2) * 5 + (kj + 2);
+                        sum += (float)imgData[ni * width + nj] * kernel[kernel_idx];
+                    } else {
+                        // Use edge padding
+                        int pi = std::max(0, std::min(height-1, ni));
+                        int pj = std::max(0, std::min(width-1, nj));
+                        int kernel_idx = (ki + 2) * 5 + (kj + 2);
+                        sum += (float)imgData[pi * width + pj] * kernel[kernel_idx];
+                    }
+                }
+            }
+            
+            blurred[i * width + j] = Convert<value_type>()(sum);
+        }
+    }
+    
+    // Unsharp masking: enhanced = original + strength * (original - blurred)
+    for (int i = 0; i < width * height; i++) {
+        float original = (float)imgData[i];
+        float blur = (float)blurred[i];
+        float detail = original - blur;
+        float enhanced_val = original + strength * detail;
+        
+        // Clamp to reasonable range
+        enhanced_val = std::max(-2.0f, std::min(2.0f, enhanced_val));
+        imgData[i] = Convert<value_type>()(enhanced_val);
+    }
+    
+    delete[] blurred;
+    delete[] enhanced;
+}
+
+template <class value_type>
+void bilateralFilter(value_type* imgData, int width, int height, float sigma_space = 2.0f, float sigma_range = 0.3f) {
+    value_type* filtered = new value_type[width * height];
+    int kernel_size = 5;
+    int half_kernel = kernel_size / 2;
+    
+    for (int i = 0; i < height; i++) {
+        for (int j = 0; j < width; j++) {
+            float sum_weights = 0.0f;
+            float sum_values = 0.0f;
+            float center_val = (float)imgData[i * width + j];
+            
+            for (int ki = -half_kernel; ki <= half_kernel; ki++) {
+                for (int kj = -half_kernel; kj <= half_kernel; kj++) {
+                    int ni = i + ki;
+                    int nj = j + kj;
+                    
+                    if (ni >= 0 && ni < height && nj >= 0 && nj < width) {
+                        float neighbor_val = (float)imgData[ni * width + nj];
+                        
+                        // Spatial weight (distance-based)
+                        float spatial_dist = sqrt(ki*ki + kj*kj);
+                        float spatial_weight = exp(-spatial_dist*spatial_dist / (2.0f * sigma_space * sigma_space));
+                        
+                        // Range weight (intensity difference-based)
+                        float range_dist = abs(center_val - neighbor_val);
+                        float range_weight = exp(-range_dist*range_dist / (2.0f * sigma_range * sigma_range));
+                        
+                        float weight = spatial_weight * range_weight;
+                        sum_weights += weight;
+                        sum_values += weight * neighbor_val;
+                    }
+                }
+            }
+            
+            if (sum_weights > 0) {
+                filtered[i * width + j] = Convert<value_type>()(sum_values / sum_weights);
+            } else {
+                filtered[i * width + j] = imgData[i * width + j];
+            }
+        }
+    }
+    
+    // Copy back
+    for (int i = 0; i < width * height; i++) {
+        imgData[i] = filtered[i];
+    }
+    
+    delete[] filtered;
+}
+
+template <class value_type>
 void gaussianSmooth(value_type* imgData, int width, int height) {
     // Simple 3x3 Gaussian kernel for noise reduction
     float kernel[9] = {
@@ -493,10 +688,41 @@ void normalizeSize(value_type* imgData, int width, int height) {
 template <class value_type>
 void applyAdvancedPreprocessing(value_type* imgData, bool quiet = false) {
     if (!quiet) {
-        std::cout << "Applying advanced preprocessing..." << std::endl;
+        std::cout << "Applying advanced preprocessing for better boundary detection..." << std::endl;
     }
     
-    // Step 1: Gaussian smoothing for noise reduction
+    // Step 1: Bilateral filtering for noise reduction while preserving edges
+    bilateralFilter<value_type>(imgData, IMAGE_W, IMAGE_H);
+    if (!quiet) std::cout << "  - Bilateral filtering applied" << std::endl;
+    
+    // Step 2: CLAHE for adaptive contrast enhancement
+    applyCLAHE<value_type>(imgData, IMAGE_W, IMAGE_H, 8, 2.0f);
+    if (!quiet) std::cout << "  - CLAHE contrast enhancement applied" << std::endl;
+    
+    // Step 3: Edge enhancement for sharper boundaries
+    enhanceEdges<value_type>(imgData, IMAGE_W, IMAGE_H, 1.2f);
+    if (!quiet) std::cout << "  - Edge enhancement applied" << std::endl;
+    
+    // Step 4: Size normalization
+    normalizeSize<value_type>(imgData, IMAGE_W, IMAGE_H);
+    if (!quiet) std::cout << "  - Size normalization applied" << std::endl;
+    
+    // Step 5: Center of mass centering
+    centerOfMass<value_type>(imgData, IMAGE_W, IMAGE_H);
+    if (!quiet) std::cout << "  - Center of mass centering applied" << std::endl;
+    
+    // Step 6: Final light Gaussian smoothing to reduce any artifacts
+    gaussianSmooth<value_type>(imgData, IMAGE_W, IMAGE_H);
+    if (!quiet) std::cout << "  - Final smoothing applied" << std::endl;
+}
+
+template <class value_type>
+void applyBasicPreprocessing(value_type* imgData, bool quiet = false) {
+    if (!quiet) {
+        std::cout << "Applying basic preprocessing..." << std::endl;
+    }
+    
+    // Step 1: Light Gaussian smoothing for noise reduction
     gaussianSmooth<value_type>(imgData, IMAGE_W, IMAGE_H);
     if (!quiet) std::cout << "  - Noise reduction applied" << std::endl;
     
@@ -508,9 +734,20 @@ void applyAdvancedPreprocessing(value_type* imgData, bool quiet = false) {
     centerOfMass<value_type>(imgData, IMAGE_W, IMAGE_H);
     if (!quiet) std::cout << "  - Center of mass centering applied" << std::endl;
     
-    // Step 4: Contrast enhancement
+    // Step 4: Simple contrast enhancement
     enhanceContrast<value_type>(imgData, IMAGE_W, IMAGE_H);
     if (!quiet) std::cout << "  - Contrast enhancement applied" << std::endl;
+}
+
+template <class value_type>
+void applyMinimalPreprocessing(value_type* imgData, bool quiet = false) {
+    if (!quiet) {
+        std::cout << "Applying minimal preprocessing..." << std::endl;
+    }
+    
+    // Only center of mass centering and very light contrast adjustment
+    centerOfMass<value_type>(imgData, IMAGE_W, IMAGE_H);
+    if (!quiet) std::cout << "  - Center of mass centering applied" << std::endl;
 }
 
 template <class value_type>
@@ -747,8 +984,8 @@ public:
         value_type imgData_h[IMAGE_H*IMAGE_W];
         readImage(fname, imgData_h, quiet);
         
-        // Apply advanced preprocessing
-        applyAdvancedPreprocessing(imgData_h, quiet);
+        // Apply basic preprocessing (safer than advanced)
+        applyBasicPreprocessing(imgData_h, quiet);
         
         // Allocate GPU memory for image
         value_type *imgData_d;
