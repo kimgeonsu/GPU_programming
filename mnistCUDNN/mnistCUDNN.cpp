@@ -25,6 +25,9 @@
 #include <sstream>
 #include <fstream>
 #include <stdlib.h>
+#include <dirent.h>
+#include <algorithm>
+#include <vector>
 
 #include <cuda.h> // need CUDA_VERSION
 #include <cudnn.h>
@@ -135,11 +138,13 @@ void FreeImageErrorHandler(FREE_IMAGE_FORMAT oFif, const char *zMessage)
     FatalError(zMessage);
 }
 template <class value_type>
-void readImage(const char* fname, value_type* imgData_h)
+void readImage(const char* fname, value_type* imgData_h, bool quiet = false)
 {
     // declare a host image object for an 8-bit grayscale image
     std::string sFilename(fname);
-    std::cout << "Loading image " << sFilename << std::endl;
+    if (!quiet) {
+        std::cout << "Loading image " << sFilename << std::endl;
+    }
     // Take care of half precision
     Convert<value_type> fromReal;
     
@@ -669,13 +674,24 @@ class network_t
                           const Layer_t<value_type>& ip1,
                           const Layer_t<value_type>& ip2)
     {
+        return classify_example(fname, conv1, conv2, ip1, ip2, false);
+    }
+    
+    int classify_example(const char* fname, const Layer_t<value_type>& conv1,
+                          const Layer_t<value_type>& conv2,
+                          const Layer_t<value_type>& ip1,
+                          const Layer_t<value_type>& ip2,
+                          bool quiet)
+    {
         int n,c,h,w;
         value_type *srcData = NULL, *dstData = NULL;
         value_type imgData_h[IMAGE_H*IMAGE_W];
 
-        readImage(fname, imgData_h);
+        readImage(fname, imgData_h, quiet);
 
-        std::cout << "Performing forward propagation ...\n";
+        if (!quiet) {
+            std::cout << "Performing forward propagation ...\n";
+        }
 
         checkCudaErrors( cudaMalloc((void**)&srcData, IMAGE_H*IMAGE_W*sizeof(value_type)) );
         checkCudaErrors( cudaMemcpy(srcData, imgData_h,
@@ -710,8 +726,10 @@ class network_t
             if (toReal(result[id]) < toReal(result[i])) id = i;
         }
 
-        std::cout << "Resulting weights from Softmax:" << std::endl;
-        printDeviceVector(n*c*h*w, dstData);
+        if (!quiet) {
+            std::cout << "Resulting weights from Softmax:" << std::endl;
+            printDeviceVector(n*c*h*w, dstData);
+        }
 
         checkCudaErrors( cudaFree(srcData) );
         checkCudaErrors( cudaFree(dstData) );
@@ -738,6 +756,37 @@ void displayUsage()
     printf( "help                   : display this help\n");
     printf( "device=<int>           : set the device to run the sample\n");
     printf( "image=<name>           : classify specific image\n");
+    printf( "batch                  : classify all .pgm files in test_image directory\n");
+}
+
+// Function to get all .pgm files from test_image directory
+std::vector<std::string> getPgmFiles(const char* program_path) {
+    std::vector<std::string> pgm_files;
+    std::string test_image_dir = "test_image";
+    
+    DIR *dir;
+    struct dirent *entry;
+    
+    dir = opendir(test_image_dir.c_str());
+    if (dir == NULL) {
+        std::cerr << "Error: Cannot open test_image directory: " << test_image_dir << std::endl;
+        return pgm_files;
+    }
+    
+    while ((entry = readdir(dir)) != NULL) {
+        std::string filename = entry->d_name;
+        if (filename.length() > 4 && filename.substr(filename.length() - 4) == ".pgm") {
+            std::string full_path = test_image_dir + "/" + filename;
+            pgm_files.push_back(full_path);
+        }
+    }
+    
+    closedir(dir);
+    
+    // Sort the files for consistent order
+    std::sort(pgm_files.begin(), pgm_files.end());
+    
+    return pgm_files;
 }
 
 int main(int argc, char *argv[])
@@ -778,6 +827,44 @@ int main(int argc, char *argv[])
         int i1 = mnist.classify_example(image_name, conv1, conv2, ip1, ip2);
         std::cout << "\nResult of classification: " << i1 << std::endl;
 
+        cudaDeviceReset();
+        exit(EXIT_SUCCESS);
+    }
+    
+    // New batch processing option
+    if (checkCmdLineFlag(argc, (const char **)argv, "batch"))
+    {
+        std::vector<std::string> pgm_files = getPgmFiles(argv[0]);
+        
+        if (pgm_files.empty()) {
+            std::cout << "No .pgm files found in test_image directory" << std::endl;
+            cudaDeviceReset();
+            exit(EXIT_WAIVED);
+        }
+        
+        std::cout << "\nProcessing " << pgm_files.size() << " .pgm files from test_image directory:\n" << std::endl;
+        std::cout << "=== PREDICTION RESULTS ===" << std::endl;
+        
+        network_t<float> mnist;
+        Layer_t<float> conv1(1,20,5,conv1_bin,conv1_bias_bin,argv[0]);
+        Layer_t<float> conv2(20,50,5,conv2_bin,conv2_bias_bin,argv[0]);
+        Layer_t<float>   ip1(800,500,1,ip1_bin,ip1_bias_bin,argv[0]);
+        Layer_t<float>   ip2(500,10,1,ip2_bin,ip2_bias_bin,argv[0]);
+        
+        for (size_t i = 0; i < pgm_files.size(); i++) {
+            int result = mnist.classify_example(pgm_files[i].c_str(), conv1, conv2, ip1, ip2, true);
+            
+            // Extract just the filename from the full path
+            std::string filename = pgm_files[i];
+            size_t lastSlash = filename.find_last_of('/');
+            if (lastSlash != std::string::npos) {
+                filename = filename.substr(lastSlash + 1);
+            }
+            
+            std::cout << filename << " -> Predicted: " << result << std::endl;
+        }
+        
+        std::cout << "\n=== BATCH PROCESSING COMPLETED ===" << std::endl;
         cudaDeviceReset();
         exit(EXIT_SUCCESS);
     }
