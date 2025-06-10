@@ -122,6 +122,10 @@ void FreeImageErrorHandler(FREE_IMAGE_FORMAT oFif, const char *zMessage)
     FatalError(zMessage);
 }
 
+// Forward declaration for basic preprocessing
+template <class value_type>
+void applyBasicPreprocessing(value_type* imgData, bool quiet);
+
 template <class value_type>
 void readImage(const char* fname, value_type* imgData_h, bool quiet = false)
 {
@@ -193,7 +197,178 @@ void readImage(const char* fname, value_type* imgData_h, bool quiet = false)
         }
     }
 
-    FreeImage_Unload(pBitmap); 
+    FreeImage_Unload(pBitmap);
+    
+    // Apply basic preprocessing
+    applyBasicPreprocessing(imgData_h, quiet);
+}
+
+// Basic preprocessing functions
+template <class value_type>
+void gaussianSmooth(value_type* imgData, int width, int height) {
+    value_type* smoothed = new value_type[width * height];
+    
+    // 3x3 Gaussian kernel (lighter smoothing)
+    float kernel[9] = {
+        1.0f/16, 2.0f/16, 1.0f/16,
+        2.0f/16, 4.0f/16, 2.0f/16,
+        1.0f/16, 2.0f/16, 1.0f/16
+    };
+    
+    for (int i = 0; i < height; i++) {
+        for (int j = 0; j < width; j++) {
+            float sum = 0.0f;
+            
+            for (int ki = -1; ki <= 1; ki++) {
+                for (int kj = -1; kj <= 1; kj++) {
+                    int ni = i + ki;
+                    int nj = j + kj;
+                    
+                    if (ni >= 0 && ni < height && nj >= 0 && nj < width) {
+                        sum += kernel[(ki+1)*3 + (kj+1)] * (float)imgData[ni * width + nj];
+                    }
+                }
+            }
+            
+            smoothed[i * width + j] = Convert<value_type>()(sum);
+        }
+    }
+    
+    // Copy back
+    for (int i = 0; i < width * height; i++) {
+        imgData[i] = smoothed[i];
+    }
+    
+    delete[] smoothed;
+}
+
+template <class value_type>
+void normalizeSize(value_type* imgData, int width, int height) {
+    // Find bounding box of non-zero pixels
+    int min_x = width, max_x = -1, min_y = height, max_y = -1;
+    
+    for (int i = 0; i < height; i++) {
+        for (int j = 0; j < width; j++) {
+            if ((float)imgData[i * width + j] > 0.1f) {
+                min_x = std::min(min_x, j);
+                max_x = std::max(max_x, j);
+                min_y = std::min(min_y, i);
+                max_y = std::max(max_y, i);
+            }
+        }
+    }
+    
+    if (max_x > min_x && max_y > min_y) {
+        int digit_width = max_x - min_x + 1;
+        int digit_height = max_y - min_y + 1;
+        
+        // Calculate scale to fit within 20x20 pixels (leaving 4-pixel border)
+        float scale = std::min(20.0f / digit_width, 20.0f / digit_height);
+        
+        if (scale < 1.0f) {
+            value_type* resized = new value_type[width * height];
+            for (int i = 0; i < width * height; i++) {
+                resized[i] = value_type(0.0f);
+            }
+            
+            int new_width = (int)(digit_width * scale);
+            int new_height = (int)(digit_height * scale);
+            int offset_x = (width - new_width) / 2;
+            int offset_y = (height - new_height) / 2;
+            
+            // Simple nearest neighbor scaling
+            for (int i = 0; i < new_height; i++) {
+                for (int j = 0; j < new_width; j++) {
+                    int src_x = min_x + (int)(j / scale);
+                    int src_y = min_y + (int)(i / scale);
+                    int dst_x = offset_x + j;
+                    int dst_y = offset_y + i;
+                    
+                    if (dst_x >= 0 && dst_x < width && dst_y >= 0 && dst_y < height) {
+                        resized[dst_y * width + dst_x] = imgData[src_y * width + src_x];
+                    }
+                }
+            }
+            
+            // Copy back
+            for (int i = 0; i < width * height; i++) {
+                imgData[i] = resized[i];
+            }
+            
+            delete[] resized;
+        }
+    }
+}
+
+template <class value_type>
+void centerOfMass(value_type* imgData, int width, int height) {
+    // Calculate center of mass
+    float sum_x = 0.0f, sum_y = 0.0f, total_mass = 0.0f;
+    
+    for (int i = 0; i < height; i++) {
+        for (int j = 0; j < width; j++) {
+            float val = (float)imgData[i * width + j];
+            if (val > 0.0f) {
+                sum_x += j * val;
+                sum_y += i * val;
+                total_mass += val;
+            }
+        }
+    }
+    
+    if (total_mass > 0) {
+        float center_x = sum_x / total_mass;
+        float center_y = sum_y / total_mass;
+        
+        // Calculate shift needed to center the digit
+        float target_x = width / 2.0f;
+        float target_y = height / 2.0f;
+        int shift_x = (int)round(target_x - center_x);
+        int shift_y = (int)round(target_y - center_y);
+        
+        // Limit shift to prevent going out of bounds
+        shift_x = std::max(-width/4, std::min(width/4, shift_x));
+        shift_y = std::max(-height/4, std::min(height/4, shift_y));
+        
+        if (abs(shift_x) > 1 || abs(shift_y) > 1) {
+            // Create shifted image
+            value_type* temp_img = new value_type[width * height];
+            for (int i = 0; i < width * height; i++) {
+                temp_img[i] = value_type(0.0f);
+            }
+            
+            // Apply shift
+            for (int i = 0; i < height; i++) {
+                for (int j = 0; j < width; j++) {
+                    int new_i = i + shift_y;
+                    int new_j = j + shift_x;
+                    
+                    if (new_i >= 0 && new_i < height && new_j >= 0 && new_j < width) {
+                        temp_img[new_i * width + new_j] = imgData[i * width + j];
+                    }
+                }
+            }
+            
+            // Copy back
+            for (int i = 0; i < width * height; i++) {
+                imgData[i] = temp_img[i];
+            }
+            
+            delete[] temp_img;
+        }
+    }
+}
+
+template <class value_type>
+void applyBasicPreprocessing(value_type* imgData, bool quiet) {
+    if (!quiet) std::cout << "Applying basic preprocessing..." << std::endl;
+    
+    // Apply basic preprocessing steps in conservative order
+    gaussianSmooth(imgData, IMAGE_W, IMAGE_H);    // Light noise reduction
+    normalizeSize(imgData, IMAGE_W, IMAGE_H);     // Size normalization  
+    centerOfMass(imgData, IMAGE_W, IMAGE_H);      // Center the digit
+    
+    if (!quiet) std::cout << "Basic preprocessing completed." << std::endl;
 }
 
 template <class value_type>
