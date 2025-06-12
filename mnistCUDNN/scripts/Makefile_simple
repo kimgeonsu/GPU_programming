@@ -1,0 +1,74 @@
+################################################################################
+# Makefile for Simple Improved MNIST CUDNN Implementation
+################################################################################
+
+# CUDA directory:
+CUDA_ROOT_DIR=/usr/local/cuda
+
+# CUDA library directory:
+CUDA_LIB_DIR= -L$(CUDA_ROOT_DIR)/lib64
+# CUDA include directory:
+CUDA_INC_DIR= -I$(CUDA_ROOT_DIR)/include
+# CUDA NVCC flags:
+NVCC_FLAGS= -c -Xcompiler -fPIC
+
+# CUDNN directory:
+CUDNN_ROOT_DIR=/usr/local/cuda
+
+# CUDNN library directory:
+CUDNN_LIB_DIR= -L$(CUDNN_ROOT_DIR)/lib64
+# CUDNN include directory:
+CUDNN_INC_DIR= -I$(CUDNN_ROOT_DIR)/include
+
+# FREEIMAGE directory:
+FI_LIB_DIR = -LFreeImage/lib/linux/x86_64 -LFreeImage/lib/linux
+FI_INC_DIR = -IFreeImage/include
+
+# CC compiler options:
+CC_FLAGS= -c -fPIC -DGL_GLEXT_PROTOTYPES
+
+# NVCC compiler options:
+NVCC=nvcc
+CC=g++
+
+# Support architectures
+CUDA_ARCHITECTURES = -gencode arch=compute_50,code=sm_50 \
+                     -gencode arch=compute_52,code=sm_52 \
+                     -gencode arch=compute_60,code=sm_60 \
+                     -gencode arch=compute_61,code=sm_61 \
+                     -gencode arch=compute_70,code=sm_70 \
+                     -gencode arch=compute_75,code=sm_75 \
+                     -gencode arch=compute_80,code=sm_80
+
+.PHONY: all clean
+
+EXECUTABLE := mnistCUDNN_simple_improved
+OBJ = fp16_dev.o fp16_emu.o mnistCUDNN_simple_improved.o
+
+all: $(EXECUTABLE)
+
+# Object files
+fp16_dev.o: fp16_dev.cu 
+	$(NVCC) $(CUDA_ARCHITECTURES) $(CUDA_INC_DIR) $(NVCC_FLAGS) fp16_dev.cu
+
+fp16_emu.o: fp16_emu.cpp 
+	$(CC) $(CUDA_INC_DIR) $(CUDNN_INC_DIR) $(FI_INC_DIR) $(CC_FLAGS) fp16_emu.cpp
+
+mnistCUDNN_simple_improved.o: mnistCUDNN_simple_improved.cpp error_util.h
+	$(CC) $(CUDA_INC_DIR) $(CUDNN_INC_DIR) $(FI_INC_DIR) $(CC_FLAGS) mnistCUDNN_simple_improved.cpp
+
+# Link
+$(EXECUTABLE): $(OBJ)
+	$(CC) $(OBJ) \
+	-o $(EXECUTABLE) $(CUDA_LIB_DIR) $(CUDNN_LIB_DIR) $(FI_LIB_DIR) \
+	-lcudart -lcublas -lcudnn -lfreeimage -lstdc++ -lm
+
+clean:
+	rm -f *.o $(EXECUTABLE)
+
+# Rules for easy running
+run: $(EXECUTABLE)
+	./$(EXECUTABLE)
+
+test: $(EXECUTABLE)
+	./$(EXECUTABLE) 
